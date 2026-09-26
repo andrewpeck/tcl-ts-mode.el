@@ -106,11 +106,43 @@
              t)
 
 
+(defcustom tcl-ts-mode-highlight-string-commands t
+  "Non-nil means highlight command substitutions inside strings as code.
+With this on, in
+
+    puts \"size: [file size $f] bytes\"
+
+the `[file size $f]' part is fontified like any other command, and only
+the literal text around it gets `font-lock-string-face'.  With it off,
+the whole quoted word is a string, as in `tcl-mode'.
+
+Takes effect the next time `tcl-ts-mode' is enabled in a buffer."
+  :type 'boolean
+  :safe #'booleanp
+  :group 'tcl)
+
+
 ;;; Font lock.
+
+(defun tcl-ts-mode--fontify-quoted-word (node override start end &rest _)
+  "Give the literal parts of the quoted word NODE `font-lock-string-face'.
+Command substitutions directly inside NODE are skipped, so the code rules
+can fontify them.  A quoted word nested inside one of those substitutions
+is matched by the same query and handled on its own.  OVERRIDE, START
+and END are as for `treesit-fontify-with-override'."
+  (let ((pos (treesit-node-start node)))
+    (dolist (child (treesit-node-children node t))
+      (when (equal (treesit-node-type child) "command_substitution")
+        (treesit-fontify-with-override
+         pos (treesit-node-start child) 'font-lock-string-face
+         override start end)
+        (setq pos (treesit-node-end child))))
+    (treesit-fontify-with-override
+     pos (treesit-node-end node) 'font-lock-string-face override start end)))
 
 (defun tcl-ts-mode--anchored-opt (words)
   "Return a regexp matching exactly any string in WORDS."
-  (concat "\\`" (regexp-opt words) "\'"))
+  (concat "\\`" (regexp-opt words) "\\'"))
 
 (defun tcl-ts-mode--font-lock-settings ()
   "Return `treesit-font-lock-settings' for `tcl-ts-mode'.
@@ -138,7 +170,9 @@ tree-sitter fontification."
 
    :language 'tcl
    :feature 'string
-   '((quoted_word) @font-lock-string-face)
+   (if tcl-ts-mode-highlight-string-commands
+       '((quoted_word) @tcl-ts-mode--fontify-quoted-word)
+     '((quoted_word) @font-lock-string-face))
 
    :language 'tcl
    :feature 'type
@@ -155,7 +189,7 @@ tree-sitter fontification."
               @font-lock-builtin-face))
      ((simple_word) @font-lock-builtin-face
       (:match "\\`\\(?:argc\\|argv0?\\|env\\|errorCode\\|errorInfo\\|\
-auto_path\\|tcl_[a-zA-Z]+\\)\'"
+auto_path\\|tcl_[a-zA-Z]+\\)\\'"
               @font-lock-builtin-face)))
 
    :language 'tcl
@@ -163,7 +197,7 @@ auto_path\\|tcl_[a-zA-Z]+\\)\'"
    ;; Deliberately not "yes"/"no"/"on"/"off": Tcl accepts them as
    ;; booleans, but they are far more often ordinary argument words.
    '(((simple_word) @font-lock-constant-face
-      (:match "\\`\\(?:true\\|false\\)\'" @font-lock-constant-face)))
+      (:match "\\`\\(?:true\\|false\\)\\'" @font-lock-constant-face)))
 
    :language 'tcl
    :feature 'number

@@ -77,6 +77,27 @@ Level 3, the Emacs default, is the closest match to =tcl-mode=.
 (setq treesit-font-lock-level 4)
 #+end_src
 
+** Commands inside strings
+
+By default a command substitution inside a string is highlighted as
+code; only the literal text around it gets the string face:
+
+#+begin_src tcl
+puts "size: [file size $f] bytes"
+#+end_src
+
+Here =file= is a builtin and =$f= a variable, while =size:= and =bytes=
+are string. A string nested inside the substitution is still a string.
+To colour the whole quoted word as a string, as =tcl-mode= does:
+
+#+begin_src emacs-lisp
+(setq tcl-ts-mode-highlight-string-commands nil)
+#+end_src
+
+This takes effect the next time =tcl-ts-mode= is enabled in a buffer.
+Variables written directly in a string (="hello $name"=) keep the string
+face either way, matching =tcl-mode=.
+
 Faces follow =tcl.el='s choices, so a =tcl-ts-mode= buffer looks like a
 =tcl-mode= buffer. The keyword lists are read from =tcl.el='s own
 variables — =tcl-keyword-list=, =tcl-builtin-list=, =tcl-typeword-list=
