@@ -25,9 +25,21 @@
 ;; `tcl-ts-mode' is a thin tree-sitter layer on top of the stock
 ;; `tcl-mode' from tcl.el.  It derives from `tcl-mode', so the keymap,
 ;; menu, indentation engine (`tcl-indent-line'), electric characters,
-;; and the `inferior-tcl' commands all behave exactly as before.  Only
-;; fontification, Imenu and `add-log-current-defun' are replaced by
-;; tree-sitter equivalents.
+;; and the `inferior-tcl' commands all behave exactly as before.
+;; Fontification, Imenu, `add-log-current-defun' and the quote/comment
+;; syntax are replaced by tree-sitter equivalents.
+;;
+;; Driving the syntax table from the parse tree is what fixes bracket
+;; matching for a command substitution nested inside a string, which
+;; Vivado and similar generators emit constantly:
+;;
+;;   set files [list \
+;;    "[file normalize "$origin_dir/IP/clk_wiz_0.xci"]"\
+;;    ]
+;;
+;; tcl.el mis-lexes that, its bracket depth goes negative, and every
+;; following line in the file loses its indentation.  See
+;; `tcl-ts-mode--quote-syntax'.
 ;;
 ;; Defun navigation is left to tcl.el on purpose.  `tcl-calculate-indent'
 ;; and `tcl-in-comment' use `beginning-of-defun' to pick the position
@@ -45,6 +57,10 @@
 ;; like a `tcl-mode' buffer -- but the parse tree means that `#' inside
 ;; a word, quotes inside braced words, and `$var(index)' references are
 ;; classified correctly instead of by regexp.
+;;
+;; Indentation is `tcl-indent-line' throughout and agrees with `tcl-mode'
+;; on any file tcl.el lexes correctly.  It differs only where the fixed
+;; quote syntax gives the indenter a correct bracket depth to work from.
 ;;
 ;; Because the keyword lists are read when the mode starts, customizing
 ;; `tcl-keyword-list', `tcl-builtin-list', `tcl-typeword-list' or
@@ -94,7 +110,7 @@
 
 (defun tcl-ts-mode--anchored-opt (words)
   "Return a regexp matching exactly any string in WORDS."
-  (concat "\\`" (regexp-opt words) "\\'"))
+  (concat "\\`" (regexp-opt words) "\'"))
 
 (defun tcl-ts-mode--font-lock-settings ()
   "Return `treesit-font-lock-settings' for `tcl-ts-mode'.
@@ -139,7 +155,7 @@ tree-sitter fontification."
               @font-lock-builtin-face))
      ((simple_word) @font-lock-builtin-face
       (:match "\\`\\(?:argc\\|argv0?\\|env\\|errorCode\\|errorInfo\\|\
-auto_path\\|tcl_[a-zA-Z]+\\)\\'"
+auto_path\\|tcl_[a-zA-Z]+\\)\'"
               @font-lock-builtin-face)))
 
    :language 'tcl
@@ -147,7 +163,7 @@ auto_path\\|tcl_[a-zA-Z]+\\)\\'"
    ;; Deliberately not "yes"/"no"/"on"/"off": Tcl accepts them as
    ;; booleans, but they are far more often ordinary argument words.
    '(((simple_word) @font-lock-constant-face
-      (:match "\\`\\(?:true\\|false\\)\\'" @font-lock-constant-face)))
+      (:match "\\`\\(?:true\\|false\\)\'" @font-lock-constant-face)))
 
    :language 'tcl
    :feature 'number
@@ -185,6 +201,110 @@ auto_path\\|tcl_[a-zA-Z]+\\)\\'"
    :language 'tcl
    :feature 'misc-punctuation
    '((unpack) @font-lock-misc-punctuation-face)))
+
+
+;;; Syntax.
+
+;; tcl.el decides what a `"' or a `#' means with a regexp, which cannot
+;; see that a command substitution nested inside a string starts a fresh
+;; word.  The parse tree can, so we drive the syntax table from it.
+
+(defconst tcl-ts-mode--syntax-punctuation (string-to-syntax ".")
+  "Syntax to give a quote or hash that is an ordinary character.")
+
+(defun tcl-ts-mode--covering-node (pos)
+  "Return the leaf node covering POS, or nil if none does.
+`treesit-node-at' answers with the following leaf when POS itself is not
+covered, which happens around ERROR nodes; reject that case."
+  (let ((node (treesit-node-at pos 'tcl)))
+    (and node
+         (<= (treesit-node-start node) pos)
+         (< pos (treesit-node-end node))
+         node)))
+
+(defun tcl-ts-mode--under-error-p (node)
+  "Return non-nil if NODE is, or is inside, an ERROR node."
+  (treesit-parent-until
+   node (lambda (n) (equal (treesit-node-type n) "ERROR")) t))
+
+(defun tcl-ts-mode--outermost-quoted-word (node)
+  "Return the outermost `quoted_word' at or above NODE, or nil."
+  (let (found)
+    (while node
+      (when (equal (treesit-node-type node) "quoted_word")
+        (setq found node))
+      (setq node (treesit-node-parent node)))
+    found))
+
+(defun tcl-ts-mode--quote-syntax (pos)
+  "Return the `syntax-table' value for the double quote at POS.
+A nil result keeps the string-delimiter meaning from the syntax table.
+
+A Tcl quoted word is a single token, so only the two outer quotes of the
+outermost `quoted_word' delimit a string; every quote nested inside it is
+an interior character.  That is what makes a command substitution inside
+a string work:
+
+    set f \"[file normalize \"$dir/x.xci\"]\"
+
+The whole word becomes one string, so its brackets are interior and the
+bracket depth stays balanced.  tcl.el instead demotes the two inner
+quotes, because neither follows one of its word delimiters, which leaves
+the `]' counting as live code and drives the depth negative.  See the
+FIXME above `tcl-syntax-propertize-function'.
+
+Asking the enclosing word rather than the quote itself also absorbs the
+quotes the grammar invents inside a braced regexp such as
+{\\+incdir\\+\"[^\"]+\"}: they become interior to one string instead of
+unbalancing the line, even where the grammar left an ERROR behind.
+
+With no enclosing word and nothing else to go on, defer to
+`tcl--syntax-of-quote', so no buffer ends up worse than in `tcl-mode'."
+  (let* ((node (tcl-ts-mode--covering-node pos))
+         (word (and node (tcl-ts-mode--outermost-quoted-word node))))
+    (cond
+     (word
+      (unless (or (eq pos (treesit-node-start word))
+                  (eq pos (1- (treesit-node-end word))))
+        tcl-ts-mode--syntax-punctuation))
+     ;; Part of a comment or an escaped character, so it delimits nothing.
+     ((and node (not (equal (treesit-node-type node) "\"")))
+      tcl-ts-mode--syntax-punctuation)
+     (t (tcl--syntax-of-quote pos)))))
+
+(defun tcl-ts-mode--bare-hash-p (pos)
+  "Return non-nil if the hash at POS cannot start a comment.
+This is tcl.el's rule, used where the tree cannot be trusted: a `#' only
+opens a comment at the start of a command."
+  (save-excursion
+    (goto-char pos)
+    (skip-chars-backward " \t")
+    (not (memq (char-before) '(nil ?\[ ?\; ?{ ?\n)))))
+
+(defun tcl-ts-mode--hash-syntax (pos)
+  "Return the `syntax-table' value for the hash at POS.
+A nil result keeps the comment-starter meaning from the syntax table."
+  (let ((node (tcl-ts-mode--covering-node pos)))
+    (cond
+     ((or (null node) (tcl-ts-mode--under-error-p node))
+      (and (tcl-ts-mode--bare-hash-p pos) tcl-ts-mode--syntax-punctuation))
+     ((and (equal (treesit-node-type node) "comment")
+           (eq pos (treesit-node-start node)))
+      nil)
+     (t tcl-ts-mode--syntax-punctuation))))
+
+(defun tcl-ts-mode--syntax-propertize (start end)
+  "Set quote and comment syntax between START and END from the parse tree.
+`syntax-propertize' has already cleared the region, so only characters
+whose meaning differs from the syntax table's need a property."
+  (goto-char start)
+  (while (re-search-forward "[\"#]" end t)
+    (let* ((pos (match-beginning 0))
+           (syntax (if (eq (char-after pos) ?\")
+                       (tcl-ts-mode--quote-syntax pos)
+                     (tcl-ts-mode--hash-syntax pos))))
+      (when syntax
+        (put-text-property pos (1+ pos) 'syntax-table syntax)))))
 
 
 ;;; Imenu and navigation.
@@ -236,9 +356,16 @@ If the `tcl' grammar is not installed, this mode is simply
 
 \\{tcl-ts-mode-map}"
   (when (treesit-ready-p 'tcl)
-    ;; Keep tcl.el's `syntax-propertize-function': `tcl-indent-line',
-    ;; the electric keys and `forward-sexp' all rely on it.
     (treesit-parser-create 'tcl)
+
+    ;; `tcl-indent-line', the electric keys, `forward-sexp' and
+    ;; `show-paren-mode' all read the syntax table rather than the parse
+    ;; tree, so replace tcl.el's regexp scanner with one driven by the
+    ;; tree.  `tcl-mode's `syntax-propertize-multiline' hook stays on
+    ;; `syntax-propertize-extend-region-functions': the fallback path
+    ;; still goes through `tcl--syntax-of-quote', which uses it.
+    (setq-local syntax-propertize-function
+                #'tcl-ts-mode--syntax-propertize)
 
     (setq-local treesit-font-lock-settings (tcl-ts-mode--font-lock-settings))
     (setq-local treesit-font-lock-feature-list
