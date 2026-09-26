@@ -77,26 +77,33 @@ Level 3, the Emacs default, is the closest match to =tcl-mode=.
 (setq treesit-font-lock-level 4)
 #+end_src
 
-** Commands inside strings
+** Code inside strings
 
-By default a command substitution inside a string is highlighted as
-code; only the literal text around it gets the string face:
+By default, command and variable substitutions inside a string are
+highlighted as code; only the literal text around them gets the string
+face:
 
 #+begin_src tcl
-puts "size: [file size $f] bytes"
+puts "size: [file size $f] bytes, owner $user"
 #+end_src
 
-Here =file= is a builtin and =$f= a variable, while =size:= and =bytes=
-are string. A string nested inside the substitution is still a string.
-To colour the whole quoted word as a string, as =tcl-mode= does:
+Here =file= is a builtin and =$f= and =$user= are variables, while
+=size:=, =bytes, owner= are string. A string nested inside a command
+substitution is handled the same way. Each kind can be switched off
+separately, going back to =tcl-mode='s all-string colouring:
 
 #+begin_src emacs-lisp
-(setq tcl-ts-mode-highlight-string-commands nil)
+(setq tcl-ts-mode-highlight-string-commands nil)   ; [...] stays string
+(setq tcl-ts-mode-highlight-string-variables nil)  ; $var stays string
 #+end_src
 
-This takes effect the next time =tcl-ts-mode= is enabled in a buffer.
-Variables written directly in a string (="hello $name"=) keep the string
-face either way, matching =tcl-mode=.
+Changes apply the next time the buffer is fontified; =M-x
+font-lock-update= shows them immediately. Both are safe as file-local
+variables.
+
+This needs the rules that colour code to be active, which by default
+means =treesit-font-lock-level= 3 or higher. At lower levels the
+substitutions simply keep the string face.
 
 Faces follow =tcl.el='s choices, so a =tcl-ts-mode= buffer looks like a
 =tcl-mode= buffer. The keyword lists are read from =tcl.el='s own

@@ -116,7 +116,32 @@ the `[file size $f]' part is fontified like any other command, and only
 the literal text around it gets `font-lock-string-face'.  With it off,
 the whole quoted word is a string, as in `tcl-mode'.
 
-Takes effect the next time `tcl-ts-mode' is enabled in a buffer."
+This only applies while the `builtin' font-lock feature is enabled,
+which by default is from `treesit-font-lock-level' 3; below that the
+substitution keeps the string face rather than showing unfontified.
+
+Takes effect the next time the buffer is fontified; use
+\\[font-lock-update] to see a change straight away."
+  :type 'boolean
+  :safe #'booleanp
+  :group 'tcl)
+
+(defcustom tcl-ts-mode-highlight-string-variables t
+  "Non-nil means highlight variable substitutions inside strings.
+With this on, in
+
+    puts \"hello $name\"
+
+`$name' gets `font-lock-variable-use-face' and only the literal text
+around it gets `font-lock-string-face'.  With it off, the variable is
+part of the string, as in `tcl-mode'.
+
+This only applies while the `variable' font-lock feature is enabled,
+which by default is from `treesit-font-lock-level' 3; below that the
+variable keeps the string face rather than showing unfontified.
+
+Takes effect the next time the buffer is fontified; use
+\\[font-lock-update] to see a change straight away."
   :type 'boolean
   :safe #'booleanp
   :group 'tcl)
@@ -124,15 +149,33 @@ Takes effect the next time `tcl-ts-mode' is enabled in a buffer."
 
 ;;; Font lock.
 
+(defun tcl-ts-mode--feature-enabled-p (feature)
+  "Return non-nil if the font-lock FEATURE is enabled in this buffer."
+  (let (on)
+    (dolist (setting treesit-font-lock-settings on)
+      (when (and (eq (nth 2 setting) feature) (nth 1 setting))
+        (setq on t)))))
+
 (defun tcl-ts-mode--fontify-quoted-word (node override start end &rest _)
   "Give the literal parts of the quoted word NODE `font-lock-string-face'.
-Command substitutions directly inside NODE are skipped, so the code rules
-can fontify them.  A quoted word nested inside one of those substitutions
-is matched by the same query and handled on its own.  OVERRIDE, START
-and END are as for `treesit-fontify-with-override'."
-  (let ((pos (treesit-node-start node)))
+Command and variable substitutions directly inside NODE are skipped,
+according to `tcl-ts-mode-highlight-string-commands' and
+`tcl-ts-mode-highlight-string-variables', so the code rules can fontify
+them.  Each is skipped only while the feature that fontifies it is
+enabled, so a low `treesit-font-lock-level' never leaves a gap.  A
+quoted word nested inside a command substitution is matched by the same
+query and handled on its own.  OVERRIDE, START and END are as for
+`treesit-fontify-with-override'."
+  (let ((pos (treesit-node-start node))
+        (code (append
+               (and tcl-ts-mode-highlight-string-commands
+                    (tcl-ts-mode--feature-enabled-p 'builtin)
+                    '("command_substitution"))
+               (and tcl-ts-mode-highlight-string-variables
+                    (tcl-ts-mode--feature-enabled-p 'variable)
+                    '("variable_substitution")))))
     (dolist (child (treesit-node-children node t))
-      (when (equal (treesit-node-type child) "command_substitution")
+      (when (member (treesit-node-type child) code)
         (treesit-fontify-with-override
          pos (treesit-node-start child) 'font-lock-string-face
          override start end)
@@ -170,9 +213,7 @@ tree-sitter fontification."
 
    :language 'tcl
    :feature 'string
-   (if tcl-ts-mode-highlight-string-commands
-       '((quoted_word) @tcl-ts-mode--fontify-quoted-word)
-     '((quoted_word) @font-lock-string-face))
+   '((quoted_word) @tcl-ts-mode--fontify-quoted-word)
 
    :language 'tcl
    :feature 'type
