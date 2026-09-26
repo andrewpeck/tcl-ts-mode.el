@@ -1,0 +1,242 @@
+#+TITLE: tcl-ts-mode
+#+OPTIONS: toc:2 num:nil
+
+Tree-sitter powered syntax highlighting for Tcl in Emacs.
+
+=tcl-ts-mode= is a thin layer on top of the stock =tcl-mode= from
+=tcl.el=. It derives from =tcl-mode=, so the keymap, menu, indentation
+engine, electric characters and the =inferior-tcl= commands all behave
+exactly as before. Only fontification, Imenu and =add-log-current-defun=
+are taken over by tree-sitter.
+
+* Requirements
+
+- Emacs 29.1 or newer, built with tree-sitter support (=(treesit-available-p)= ⇒ =t=)
+- The [[https://github.com/tree-sitter-grammars/tree-sitter-tcl][tree-sitter-tcl]] grammar
+- A C compiler, to build the grammar
+
+* Installation
+
+Put =tcl-ts-mode.el= on your =load-path=, then:
+
+#+begin_src emacs-lisp
+(require 'tcl-ts-mode)
+#+end_src
+
+Loading the file registers a grammar recipe in
+=treesit-language-source-alist=, so installing the grammar is just:
+
+: M-x treesit-install-language-grammar RET tcl RET
+
+Accept the defaults when prompted. Verify with =(treesit-ready-p 'tcl)=.
+
+** With =use-package=
+
+#+begin_src emacs-lisp
+(use-package tcl-ts-mode
+  :load-path "/path/to/tcl-ts-mode"
+  :defer t)
+#+end_src
+
+* Activation
+
+Loading the file adds an entry to =major-mode-remap-alist= when the
+grammar is available, so every file that would have opened in =tcl-mode=
+opens in =tcl-ts-mode= instead:
+
+#+begin_src emacs-lisp
+(when (treesit-ready-p 'tcl t)
+  (add-to-list 'major-mode-remap-alist '(tcl-mode . tcl-ts-mode)))
+#+end_src
+
+=auto-mode-alist= is deliberately left alone, so =tcl.el= keeps owning
+the file associations (=.tcl=, =.tk=, the =tclsh=/=wish= interpreters).
+
+To opt out of the remap, remove the entry:
+
+#+begin_src emacs-lisp
+(setq major-mode-remap-alist (assq-delete-all 'tcl-mode major-mode-remap-alist))
+#+end_src
+
+If the grammar is not installed, =tcl-ts-mode= quietly behaves as plain
+=tcl-mode= rather than erroring.
+
+* Highlighting
+
+How much gets highlighted is controlled by =treesit-font-lock-level=.
+Level 3, the Emacs default, is the closest match to =tcl-mode=.
+
+| Level | Adds                                                           |
+|-------+----------------------------------------------------------------|
+|     1 | comments, =proc= names, parameter names                         |
+|     2 | keywords, strings, type words                                   |
+|     3 | builtins, =true=/=false=, numbers, variables                    |
+|     4 | command calls, escapes, operators, brackets, delimiters, ={*}=  |
+
+#+begin_src emacs-lisp
+(setq treesit-font-lock-level 4)
+#+end_src
+
+Faces follow =tcl.el='s choices, so a =tcl-ts-mode= buffer looks like a
+=tcl-mode= buffer. The keyword lists are read from =tcl.el='s own
+variables — =tcl-keyword-list=, =tcl-builtin-list=, =tcl-typeword-list=
+and =tcl-proc-list= — so existing customizations carry over. They are
+read when the mode starts, so changes take effect the next time
+=tcl-ts-mode= is enabled.
+
+** What the parse tree buys you
+
+Because classification comes from a real parser rather than regexps:
+
+- =#= inside a word is not mistaken for a comment
+- quotes inside braced words do not start strings
+- =$var(index)= and =${weird name}= are recognised as one reference
+- =proc= parameters, including ={arg default}= forms, are highlighted
+- operators inside =expr= are highlighted
+- a =proc= indented inside a =namespace= is found correctly by Imenu,
+  which =tcl.el='s regexp approach misses
+
+** Nested command substitutions no longer break the buffer
+
+Paren matching, =show-paren-mode=, =forward-sexp= and indentation all read
+the *syntax table* rather than the parse tree, so =tcl-ts-mode= replaces
+=tcl.el='s regexp-based scanner with one driven by the tree
+(=tcl-ts-mode--quote-syntax=).
+
+This matters for a command substitution nested inside a string, which
+Vivado-generated scripts emit constantly:
+
+#+begin_src tcl
+set files [list \
+ "[file normalize "$origin_dir/IP/clk_wiz_0.xci"]"\
+ ]
+#+end_src
+
+That is valid Tcl (=info complete= ⇒ 1). But =tcl.el= demotes the two
+inner quotes to punctuation, because a ="= not preceded by one of =[;{=,
+space, tab or newline is assumed to be mid-word. The =]= is then counted
+as live code, the bracket depth goes *negative*, and every following line
+in the file loses its indentation — =proc= bodies collapse to column 0.
+It is the documented =FIXME= at =tcl.el:452=:
+
+#+begin_src emacs-lisp
+;; FIXME: Handle the [...] commands nested inside "..." strings.
+#+end_src
+
+=tcl-ts-mode= treats a Tcl quoted word as the single token it is: only the
+outermost =quoted_word= gets string delimiters, so the brackets are
+interior and the depth stays balanced. Where the grammar leaves an ERROR
+it falls back to =tcl--syntax-of-quote=, so no buffer is ever worse than
+it is in =tcl-mode=.
+
+Measured over 39 real Tcl files (21.8k lines), files ending at a nonzero
+bracket depth dropped from 4 under =tcl-mode= to 2 under =tcl-ts-mode=,
+with no file made worse. The two that remain are the =regsub= /
+unbraced-regex case below, which defeats both modes.
+
+* Deliberate design choices
+
+** Indentation stays with tcl.el
+
+=tcl-indent-line= remains in charge; no tree-sitter indent rules are
+defined. Indentation is byte-identical to =tcl-mode= on every file
+=tcl.el= lexes correctly — verified over 21.8k lines of Tcl and across all
+three =tcl-tab-always-indent= styles. It differs only on the files where
+the corrected quote syntax (above) finally gives the indenter a sane
+bracket depth.
+All of =tcl-indent-level=, =tcl-continued-indent-level= and
+=tcl-type-alist= work as documented.
+
+** Defun navigation stays with tcl.el
+
+This is load-bearing, not an oversight. =tcl-calculate-indent=
+(=tcl.el:855=) and =tcl-in-comment= (=tcl.el:1291=) call
+=beginning-of-defun= to choose the position they start parsing from.
+=treesit-beginning-of-defun= can land *inside* a brace group, which
+changes the computed indentation — a =proc= body inside =namespace eval=
+indents to column 0 instead of 4.
+
+Keeping =tcl.el='s version means =C-M-a=, =mark-defun=, =tcl-eval-defun=
+and indentation all agree with =tcl-mode=. Imenu and
+=add-log-current-defun= still use the parse tree.
+
+If you would rather have parse-tree navigation and can live with the
+indentation differences:
+
+#+begin_src emacs-lisp
+(add-hook 'tcl-ts-mode-hook
+          (lambda ()
+            (setq-local beginning-of-defun-function #'treesit-beginning-of-defun
+                        end-of-defun-function #'treesit-end-of-defun)))
+#+end_src
+
+** Booleans are only =true= and =false=
+
+Tcl accepts =yes=, =no=, =on= and =off= as booleans too, but in practice
+they are far more often ordinary argument words. In a 600k-character
+sample, =on= appeared 142 times and =no= 51 times, almost never as a
+boolean — so highlighting them was pure noise.
+
+* Performance
+
+Driving the syntax table from the tree means every buffer edit needs a
+reparse before =syntax-ppss= can answer. On a 1302-line Vivado script:
+
+| operation                 | =tcl-mode= | =tcl-ts-mode= |
+|---------------------------+------------+---------------|
+| propertize whole buffer   |    55 ms   |     69 ms     |
+| one keystroke + syntax-ppss |  1.4 ms  |    4.2 ms     |
+| =indent-region=, whole file |   396 ms |   1791 ms     |
+
+Typing stays well inside a frame budget; bulk =indent-region= on a large
+file is the one noticeable cost.
+
+Most of that is the parser, not the syntax code: with
+=tcl-ts-mode--syntax-propertize= replaced by a no-op that touches no
+nodes at all, =indent-region= still takes 1581 ms and a keystroke 3.9 ms.
+So roughly 12% of the gap is the quote logic and the rest is the price of
+having a tree-sitter parser in the buffer, which any =-ts-mode= pays.
+Caching inside the propertize function was measured and not worth the
+complexity.
+
+* Limitations
+
+** The grammar rejects some valid Tcl
+
+These produce =ERROR= nodes and so lose highlighting in that region:
+
+- regexp and glob patterns in braces containing =(= or =[=, e.g.
+  =regexp {^v(\d+)\.(\d+)$} $version=
+- =set= with a braced variable name, e.g. =set {::syntax(a b)} c=
+- =try ... on ok= (the grammar only accepts =on error=)
+
+Measured over ~600k characters of real Tcl, =ERROR= regions were about
+2.5% of the text. Indentation is unaffected, since it does not come from
+the parse tree.
+
+A =\= line continuation placed immediately after a closing =\"=, with no
+space between them, also yields a soft =MISSING= node. Writing =\" \\=
+instead of =\"\\= avoids it.
+
+** Escaped newlines are not highlighted
+
+A backslash at end of line is an "extra" in the grammar rather than a
+node, so it cannot be matched by a query and does not get the
+=tcl-escaped-newline= face that =tcl-mode= gives it.
+
+* Development
+
+Byte-compile and lint:
+
+#+begin_src sh
+emacs -Q --batch -f batch-byte-compile tcl-ts-mode.el
+emacs -Q --batch --eval '(progn (require (quote checkdoc)) (checkdoc-file "tcl-ts-mode.el"))'
+#+end_src
+
+Inspect the parse tree for the node names used in the font-lock queries:
+
+: M-x treesit-explore-mode
+
+* License
+
+GPL-3.0-or-later.
