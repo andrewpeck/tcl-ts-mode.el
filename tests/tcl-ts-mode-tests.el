@@ -255,6 +255,16 @@ set g \"[file normalize \"$dir/x\"]\"
     (should (eq (char-before) ?\]))
     (should (looking-at-p "\"\n"))))
 
+(ert-deftest tcl-ts-mode-test-patch-fixes-plain-tcl-mode ()
+  "Loading tcl-ts-mode applies the tcl.el patch, so plain `tcl-mode' is fixed.
+Needs no grammar."
+  (with-temp-buffer
+    (insert "set f \"[file normalize \"/tmp/x\"]\"\nputs one\n")
+    (let ((major-mode-remap-alist nil))
+      (tcl-mode))
+    (should (= (tcl-ts-mode-tests--depth) 0))
+    (should-not (tcl-ts-mode-tests--in-string-p "puts one"))))
+
 (ert-deftest tcl-ts-mode-test-syntax-vivado-list ()
   (skip-unless (tcl-ts-mode-tests--grammar-p))
   (tcl-ts-mode-tests--with-buffer tcl-ts-mode-tests--vivado

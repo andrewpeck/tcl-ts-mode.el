@@ -127,12 +127,9 @@ Because classification comes from a real parser rather than regexps:
 ** Nested command substitutions no longer break the buffer
 
 Paren matching, =show-paren-mode=, =forward-sexp= and indentation all read
-the *syntax table* rather than the parse tree, so =tcl-ts-mode= replaces
-=tcl.el='s regexp-based scanner with one driven by the tree
-(=tcl-ts-mode--quote-syntax=).
-
-This matters for a command substitution nested inside a string, which
-Vivado-generated scripts emit constantly:
+the *syntax table* rather than the parse tree, so they depend on
+=tcl.el='s quote handling. That handling breaks on a command substitution
+nested inside a string, which Vivado-generated scripts emit constantly:
 
 #+begin_src tcl
 set files [list \
@@ -140,38 +137,35 @@ set files [list \
  ]
 #+end_src
 
-That is valid Tcl (=info complete= ⇒ 1). But =tcl.el= demotes the two
-inner quotes to punctuation, because a ="= not preceded by one of =[;{=,
-space, tab or newline is assumed to be mid-word. The =]= is then counted
-as live code, the bracket depth goes *negative*, and every following line
-in the file loses its indentation — =proc= bodies collapse to column 0.
-It is the documented =FIXME= at =tcl.el:452=:
+That is valid Tcl (=info complete= ⇒ 1). But stock =tcl.el= closes the
+outer string at the inner opening quote and then demotes the inner
+closing quote, so the =]= is counted as live code, the bracket depth goes
+*negative*, and every following line in the file loses its indentation —
+=proc= bodies collapse to column 0. It is the documented =FIXME= at
+=tcl.el:452=:
 
 #+begin_src emacs-lisp
 ;; FIXME: Handle the [...] commands nested inside "..." strings.
 #+end_src
 
-=tcl-ts-mode= treats a Tcl quoted word as the single token it is: only the
-outermost =quoted_word= gets string delimiters, so the brackets are
-interior and the depth stays balanced. Where the grammar leaves an ERROR
-it falls back to =tcl--syntax-of-quote=, so no buffer is ever worse than
-it is in =tcl-mode=.
+=tcl-ts-mode-tcl-patch.el= fixes this in =tcl.el= itself, pending the same
+fix upstream. Loading =tcl-ts-mode= applies it
+(=tcl-ts-mode-tcl-patch-apply=), which redefines =tcl--syntax-of-quote=
+so that a quote inside a =[...]= within a string is not a string
+delimiter. Because it patches =tcl.el=, plain =tcl-mode= is fixed too.
 
 Measured over 39 real Tcl files (21.8k lines), files ending at a nonzero
-bracket depth dropped from 4 under =tcl-mode= to 2 under =tcl-ts-mode=,
-with no file made worse. The two that remain are the =regsub= /
-unbraced-regex case below, which defeats both modes.
+bracket depth dropped from 4 under stock =tcl-mode= to 2. The two that
+remain are the =regsub= / unbraced-regex case below.
 
 * Deliberate design choices
 
 ** Indentation stays with tcl.el
 
 =tcl-indent-line= remains in charge; no tree-sitter indent rules are
-defined. Indentation is byte-identical to =tcl-mode= on every file
-=tcl.el= lexes correctly — verified over 21.8k lines of Tcl and across all
-three =tcl-tab-always-indent= styles. It differs only on the files where
-the corrected quote syntax (above) finally gives the indenter a sane
-bracket depth.
+defined, and the syntax table is =tcl.el='s (patched, above), so
+indentation is byte-identical to =tcl-mode= — verified over 21.8k lines
+of Tcl and across all three =tcl-tab-always-indent= styles.
 All of =tcl-indent-level=, =tcl-continued-indent-level= and
 =tcl-type-alist= work as documented.
 
@@ -207,25 +201,23 @@ boolean — so highlighting them was pure noise.
 
 * Performance
 
-Driving the syntax table from the tree means every buffer edit needs a
-reparse before =syntax-ppss= can answer. On a 1302-line Vivado script:
+Having a tree-sitter parser in the buffer means every edit needs a
+reparse. On a 1302-line Vivado script, with both modes using the patched
+=tcl.el= syntax:
 
-| operation                 | =tcl-mode= | =tcl-ts-mode= |
-|---------------------------+------------+---------------|
-| propertize whole buffer   |    55 ms   |     69 ms     |
-| one keystroke + syntax-ppss |  1.4 ms  |    4.2 ms     |
-| =indent-region=, whole file |   396 ms |   1791 ms     |
+| operation                   | =tcl-mode= | =tcl-ts-mode= |
+|-----------------------------+------------+---------------|
+| propertize whole buffer     |      70 ms |         88 ms |
+| one keystroke + syntax-ppss |     1.3 ms |        4.4 ms |
+| =indent-region=, whole file |     395 ms |       1780 ms |
 
 Typing stays well inside a frame budget; bulk =indent-region= on a large
-file is the one noticeable cost.
+file is the one noticeable cost, and it is the price of the parser, which
+any =-ts-mode= pays.
 
-Most of that is the parser, not the syntax code: with
-=tcl-ts-mode--syntax-propertize= replaced by a no-op that touches no
-nodes at all, =indent-region= still takes 1581 ms and a keystroke 3.9 ms.
-So roughly 12% of the gap is the quote logic and the rest is the price of
-having a tree-sitter parser in the buffer, which any =-ts-mode= pays.
-Caching inside the propertize function was measured and not worth the
-complexity.
+The patch itself costs little: stock =tcl-mode= on the same file takes
+65 ms to propertize the whole buffer, 1.3 ms per keystroke and 362 ms for
+=indent-region=.
 
 * Limitations
 
