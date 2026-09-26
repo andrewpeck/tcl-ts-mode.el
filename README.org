@@ -261,6 +261,22 @@ emacs -Q --batch -f batch-byte-compile tcl-ts-mode.el
 emacs -Q --batch --eval '(progn (require (quote checkdoc)) (checkdoc-file "tcl-ts-mode.el"))'
 #+end_src
 
+Run the ERT tests from the repository root:
+
+#+begin_src sh
+emacs -Q --batch -L . -l tests/tcl-ts-mode-tests.el -f ert-run-tests-batch-and-exit
+#+end_src
+
+Most tests need the =tcl= grammar and are skipped without it. If the
+grammar is not installed where Emacs looks by default, point
+=TCL_TS_GRAMMAR_DIR= at the directory containing
+=libtree-sitter-tcl.so=:
+
+#+begin_src sh
+TCL_TS_GRAMMAR_DIR=/path/to/dir emacs -Q --batch -L . \
+  -l tests/tcl-ts-mode-tests.el -f ert-run-tests-batch-and-exit
+#+end_src
+
 Inspect the parse tree for the node names used in the font-lock queries:
 
 : M-x treesit-explore-mode
